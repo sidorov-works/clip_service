@@ -9,6 +9,8 @@ import torch
 
 from shared.models import ClassifyTask, ClassifyResult
 
+import logging
+logger = logging.getLogger(__name__)
 
 class CLIPWorker:
     """
@@ -24,12 +26,29 @@ class CLIPWorker:
         self.processor = None
         self.device = config.DEVICE
         self.tasks_processed = 0
-    
+        self.model_path = config.MODELS_ROOT / config.MODEL_NAME.replace('/', '--')
+
     async def load_model(self):
-        """Загружает модель CLIP (вызывается один раз при старте)."""
+        """Загружает модель CLIP из фиксированной папки."""
+
         def _load():
-            model = CLIPModel.from_pretrained(config.MODEL_NAME)
-            processor = CLIPProcessor.from_pretrained(config.MODEL_NAME)
+            # Скачиваем модель, если её нет
+            if not self.model_path.exists():
+                logger.info(f"Скачивание модели {config.MODEL_NAME} в {self.model_path}")
+                self.model_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                from huggingface_hub import snapshot_download
+                snapshot_download(
+                    repo_id=config.MODEL_NAME,
+                    local_dir=str(self.model_path),
+                    ignore_patterns=["*.h5", "*.ot", "*.msgpack"],
+                    max_workers=4
+                )
+                logger.info("Модель скачана")
+            
+            # Загружаем из локальной папки
+            model = CLIPModel.from_pretrained(str(self.model_path))
+            processor = CLIPProcessor.from_pretrained(str(self.model_path))
             model = model.to(self.device)
             model.eval()
             return model, processor
@@ -37,7 +56,7 @@ class CLIPWorker:
         # ✅ run_in_executor для загрузки модели (тяжёлая операция)
         loop = asyncio.get_event_loop()
         self.model, self.processor = await loop.run_in_executor(None, _load)
-        print(f"CLIP модель загружена на {self.device}")
+        print(f"CLIP модель загружена из {self.model_path} на {self.device}")
     
     async def start(self):
         """Запускает цикл обработки задач."""

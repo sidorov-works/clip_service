@@ -10,7 +10,7 @@ class Config:
 
     # --- Сервер ---
     HOST = os.getenv("HOST", "localhost")
-    PORT = int(os.getenv("PORT"))
+    PORT = int(os.getenv("CLIP_PORT"))
 
     # --- Безопасность и аутентификация ---
     INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET")
@@ -19,6 +19,7 @@ class Config:
     
     # --- Модель ---
     MODEL_NAME = os.getenv("MODEL_NAME", "openai/clip-vit-base-patch32")
+    MODELS_ROOT = Path(os.getenv("MODELS_ROOT", "/app/models")) # ВАЖНО: фиксированная папка, не HF cache
 
     # --- Device (mps / cuda / cpu) ---
     if torch.backends.mps.is_available():
