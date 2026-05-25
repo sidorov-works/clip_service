@@ -1,16 +1,17 @@
 # main.py
 """
-CLIP Classification Service — сервер для zero-shot классификации изображений.
+CLIP Classification Service — сервер для zero-shot классификации изображений и валидации OCR.
 
 Архитектура:
 - Единственный воркер с загруженной моделью CLIP
 - Асинхронная очередь для batch-запросов
 - Поддержка batch-обработки нескольких изображений за один запрос
-- Совместимость с TEI-подобной архитектурой
 
 Эндпоинты:
 - POST /classify — классификация одного изображения
-- POST /classify/batch — классификация нескольких изображений (основной режим)
+- POST /classify/batch — батчевая классификация (основной режим)
+- POST /validate — валидация одного OCR результата
+- POST /validate/batch — батчевая валидация OCR результатов
 - GET /health — проверка здоровья
 - GET /info — информация о сервисе
 """
@@ -20,39 +21,41 @@ import base64
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any
 
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
+from shared.config import config
 from shared.models import (
-    ClassifyResult, 
-    ClassifyTask, 
-    ClassifyResponse, 
-    ClassifyRequest,
-    BatchClassifyRequest,
-    BatchClassifyResponse,
-    HealthResponse
+    # Pydantic модели для API
+    ClassifyRequest, ClassifyResponse,
+    BatchClassifyRequest, BatchClassifyResponse,
+    ValidateRequest, ValidateResponse,
+    BatchValidateRequest, BatchValidateResponse,
+    HealthResponse,
+    # Внутренние модели для очереди
+    ClassifyTask, ClassifyResult,
+    ValidateTask, ValidateResult
 )
 from workers.clip_worker import CLIPWorker
-from shared.config import config
-
 from shared.auth_service import require_header_secret
-require_auth = require_header_secret if config.REQUIRE_AUTH else lambda: None
 
 import setproctitle
 setproctitle.setproctitle("classification_service")
 
+# Авторизация
+require_auth = require_header_secret if config.REQUIRE_AUTH else lambda: None
 
 # ======================================================================
 # Глобальные объекты (как в TEI)
 # ======================================================================
 
-input_queue: asyncio.Queue = None
-output_queue: asyncio.Queue = None
-worker = None
-dispatcher: Dict[str, asyncio.Future] = {}
+input_queue: asyncio.Queue = None      # Очередь входящих задач
+output_queue: asyncio.Queue = None     # Очередь исходящих результатов
+worker: CLIPWorker = None              # Единственный воркер с моделью
+dispatcher: Dict[str, asyncio.Future] = {}  # task_id -> Future
 
 
 # ======================================================================
@@ -74,7 +77,7 @@ def decode_base64_image(b64_str: str) -> bytes:
 
 
 def validate_image_size(image_bytes: bytes) -> None:
-    """Проверяет размер изображения."""
+    """Проверяет размер изображения, выбрасывает 413 если слишком большой."""
     size_mb = len(image_bytes) / (1024 * 1024)
     if size_mb > config.MAX_IMAGE_SIZE_MB:
         raise HTTPException(
@@ -83,9 +86,9 @@ def validate_image_size(image_bytes: bytes) -> None:
         )
 
 
-async def submit_task(image_bytes: bytes, categories: List[str]) -> ClassifyResult:
+async def submit_classify_task(image_bytes: bytes, categories: List[str]) -> ClassifyResult:
     """
-    Отправляет задачу в очередь и ожидает результат.
+    Отправляет задачу классификации в очередь и ожидает результат.
     """
     if input_queue.qsize() >= config.QUEUE_MAXSIZE * 0.9:
         raise HTTPException(503, "Service busy, queue is full")
@@ -115,6 +118,49 @@ async def submit_task(image_bytes: bytes, categories: List[str]) -> ClassifyResu
         raise
 
 
+async def submit_validate_task(image_bytes: bytes, text: str) -> ValidateResult:
+    """
+    Отправляет задачу валидации в очередь и ожидает результат.
+    """
+    if input_queue.qsize() >= config.QUEUE_MAXSIZE * 0.9:
+        raise HTTPException(503, "Service busy, queue is full")
+    
+    task_id = str(uuid.uuid4())
+    future = asyncio.get_event_loop().create_future()
+    dispatcher[task_id] = future
+    
+    task = ValidateTask(
+        task_id=task_id,
+        image_bytes=image_bytes,
+        text=text,
+        created_at=time.time()
+    )
+    
+    try:
+        await input_queue.put(task)
+        result = await asyncio.wait_for(future, timeout=config.BATCH_TIMEOUT)
+        return result
+    except asyncio.TimeoutError:
+        dispatcher.pop(task_id, None)
+        if not future.done():
+            future.cancel()
+        raise HTTPException(504, f"Validation timeout after {config.BATCH_TIMEOUT} seconds")
+    except Exception as e:
+        dispatcher.pop(task_id, None)
+        raise
+
+
+async def create_failed_validation_result(task_id: str, error_msg: str) -> ValidateResult:
+    """Создаёт результат для неудачной валидации (используется при ошибках в batch-запросе)."""
+    return ValidateResult(
+        task_id=task_id,
+        success=False,
+        confidence=0.0,
+        error=error_msg,
+        processing_time_ms=0
+    )
+
+
 # ======================================================================
 # Lifespan (как в TEI)
 # ======================================================================
@@ -124,11 +170,12 @@ async def lifespan(app: FastAPI):
     """Управление жизненным циклом приложения."""
     global input_queue, output_queue, worker
     
+    # Инициализируем очереди
     input_queue = asyncio.Queue(maxsize=config.QUEUE_MAXSIZE)
     output_queue = asyncio.Queue(maxsize=config.QUEUE_MAXSIZE)
-    worker = CLIPWorker(input_queue, output_queue)
     
-    # Запускаем воркера
+    # Создаём и запускаем воркера
+    worker = CLIPWorker(input_queue, output_queue)
     worker_task = asyncio.create_task(worker.start())
     
     # Запускаем диспетчер результатов
@@ -142,7 +189,7 @@ async def lifespan(app: FastAPI):
     
     yield
     
-    # Остановка
+    # Корректная остановка
     worker.running = False
     worker_task.cancel()
     dispatcher_task.cancel()
@@ -154,11 +201,18 @@ async def result_dispatcher():
     """Отправляет результаты обратно ожидающим клиентам."""
     while True:
         try:
-            result: ClassifyResult = await output_queue.get()
-            future = dispatcher.pop(result.task_id, None)
+            result = await output_queue.get()
+            
+            # Определяем тип результата по наличию атрибутов
+            if hasattr(result, 'category'):  # ClassifyResult
+                future = dispatcher.pop(result.task_id, None)
+            else:  # ValidateResult
+                future = dispatcher.pop(result.task_id, None)
+            
             if future and not future.done():
                 future.set_result(result)
             output_queue.task_done()
+            
         except Exception as e:
             print(f"Ошибка в диспетчере: {e}")
 
@@ -170,7 +224,7 @@ async def result_dispatcher():
 app = FastAPI(
     lifespan=lifespan,
     title="CLIP Classification Service",
-    description="Zero-shot классификация изображений через CLIP",
+    description="Zero-shot классификация изображений и валидация OCR через CLIP",
     version="1.0.0"
 )
 
@@ -183,15 +237,15 @@ app.add_middleware(
 
 
 # ======================================================================
-# Эндпоинты
+# Эндпоинты классификации
 # ======================================================================
 
 @app.post("/classify", response_model=ClassifyResponse)
 async def classify_single(
-    request: Request, 
+    request: Request,
     req: ClassifyRequest,
-    _ = Depends(require_header_secret)
-    ):
+    _ = Depends(require_auth)
+):
     """
     Классификация одного изображения.
     
@@ -208,7 +262,7 @@ async def classify_single(
     image_bytes = decode_base64_image(req.image)
     validate_image_size(image_bytes)
     
-    result = await submit_task(image_bytes, categories)
+    result = await submit_classify_task(image_bytes, categories)
     
     return ClassifyResponse(
         success=result.success,
@@ -223,12 +277,18 @@ async def classify_single(
 
 @app.post("/classify/batch", response_model=BatchClassifyResponse)
 async def classify_batch(
-    request: Request, 
+    request: Request,
     req: BatchClassifyRequest,
-    _ = Depends(require_header_secret)
-    ):
+    _ = Depends(require_auth)
+):
     """
     Батчевая классификация нескольких изображений (основной режим).
+    
+    Request body:
+    {
+        "images": ["base64...", "base64..."],
+        "categories": ["категория1", "категория2"]  # опционально
+    }
     """
     start_time = time.time()
     
@@ -245,24 +305,25 @@ async def classify_batch(
     categories = req.categories or config.DEFAULT_CATEGORIES
     task_id = str(uuid.uuid4())
     
-    async def _create_failed_result(error_msg: str, idx: int) -> ClassifyResult:
-        return ClassifyResult(
-            task_id=f"{task_id}_{idx}",
-            success=False,
-            error=error_msg,
-            processing_time_ms=0
-        )
-    
+    # Подготовка задач
     tasks = []
     for i, image_b64 in enumerate(images):
         try:
             image_bytes = decode_base64_image(image_b64)
             validate_image_size(image_bytes)
-            tasks.append(submit_task(image_bytes, categories))
+            tasks.append(submit_classify_task(image_bytes, categories))
         except HTTPException as e:
-            tasks.append(_create_failed_result(e.detail, i))
+            # Создаём неудачный результат для этого изображения
+            async def failed_result(idx: int, error_msg: str):
+                return ClassifyResult(
+                    task_id=f"{task_id}_{idx}",
+                    success=False,
+                    error=error_msg,
+                    processing_time_ms=0
+                )
+            tasks.append(failed_result(i, e.detail))
     
-    # return_exceptions=True — не падаем при исключениях
+    # Запускаем все задачи параллельно
     results = await asyncio.gather(*tasks, return_exceptions=True)
     
     total_time_ms = (time.time() - start_time) * 1000
@@ -295,6 +356,132 @@ async def classify_batch(
         error=None
     )
 
+
+# ======================================================================
+# Эндпоинты валидации OCR
+# ======================================================================
+
+@app.post("/validate", response_model=ValidateResponse)
+async def validate_ocr(
+    request: Request,
+    req: ValidateRequest,
+    _ = Depends(require_auth)
+):
+    """
+    Проверяет, соответствует ли распознанный текст изображению.
+    
+    Request body:
+    {
+        "image": "base64...",
+        "text": "распознанный текст",
+        "threshold": 0.5  # опционально
+    }
+    """
+    start_time = time.time()
+    
+    image_bytes = decode_base64_image(req.image)
+    validate_image_size(image_bytes)
+    
+    result = await submit_validate_task(image_bytes, req.text)
+    
+    total_time_ms = (time.time() - start_time) * 1000
+    threshold = req.threshold or 0.5
+    is_valid = result.confidence >= threshold if result.success else False
+    
+    return ValidateResponse(
+        success=result.success,
+        task_id=result.task_id,
+        is_valid=is_valid,
+        confidence=result.confidence,
+        processing_time_ms=total_time_ms,
+        error=result.error
+    )
+
+
+@app.post("/validate/batch", response_model=BatchValidateResponse)
+async def validate_ocr_batch(
+    request: Request,
+    req: BatchValidateRequest,
+    _ = Depends(require_auth)
+):
+    """
+    Батчевая валидация OCR результатов.
+    
+    Request body:
+    {
+        "images": ["base64...", "base64..."],
+        "texts": ["текст1", "текст2"],
+        "threshold": 0.5
+    }
+    """
+    start_time = time.time()
+    
+    images = req.images
+    texts = req.texts
+    
+    if not images or not texts:
+        raise HTTPException(400, "images and texts are required and cannot be empty")
+    
+    if len(images) != len(texts):
+        raise HTTPException(400, "images and texts must have the same length")
+    
+    if len(images) > config.MAX_IMAGES_PER_BATCH:
+        raise HTTPException(
+            400,
+            f"Too many images in batch. Max {config.MAX_IMAGES_PER_BATCH}, got {len(images)}"
+        )
+    
+    task_id = str(uuid.uuid4())
+    threshold = req.threshold or 0.5
+    
+    # Подготовка задач
+    tasks = []
+    for i, (image_b64, text) in enumerate(zip(images, texts)):
+        try:
+            image_bytes = decode_base64_image(image_b64)
+            validate_image_size(image_bytes)
+            tasks.append(submit_validate_task(image_bytes, text))
+        except HTTPException as e:
+            tasks.append(create_failed_validation_result(f"{task_id}_{i}", e.detail))
+    
+    # Запускаем все задачи параллельно
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    total_time_ms = (time.time() - start_time) * 1000
+    
+    responses = []
+    for result in results:
+        if isinstance(result, Exception):
+            responses.append(ValidateResponse(
+                success=False,
+                task_id="",
+                is_valid=False,
+                confidence=0.0,
+                processing_time_ms=0,
+                error=str(result)
+            ))
+        else:
+            responses.append(ValidateResponse(
+                success=result.success,
+                task_id=result.task_id,
+                is_valid=result.confidence >= threshold if result.success else False,
+                confidence=result.confidence,
+                processing_time_ms=result.processing_time_ms,
+                error=result.error
+            ))
+    
+    return BatchValidateResponse(
+        success=True,
+        task_id=task_id,
+        results=responses,
+        processing_time_ms=total_time_ms,
+        error=None
+    )
+
+
+# ======================================================================
+# Health & Info
+# ======================================================================
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -331,7 +518,15 @@ async def get_info():
         "default_categories": config.DEFAULT_CATEGORIES,
         "max_images_per_batch": config.MAX_IMAGES_PER_BATCH,
         "max_image_size_mb": config.MAX_IMAGE_SIZE_MB,
-        "queue_maxsize": config.QUEUE_MAXSIZE
+        "queue_maxsize": config.QUEUE_MAXSIZE,
+        "endpoints": [
+            "/classify",
+            "/classify/batch",
+            "/validate",
+            "/validate/batch",
+            "/health",
+            "/info"
+        ]
     }
 
 
@@ -342,7 +537,7 @@ async def get_info():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
-        "classification_server:app",
+        "main:app",
         host=config.HOST,
         port=config.PORT,
         reload=False,

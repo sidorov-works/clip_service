@@ -1,14 +1,19 @@
-# CLIP Classification Service
+# CLIP Classification & Validation Service
 
-Сервис для zero-shot классификации изображений на основе модели CLIP. Позволяет классифицировать изображения по произвольным текстовым категориям без необходимости дообучения.
+Сервис для zero-shot классификации изображений и валидации результатов OCR на основе модели CLIP. Позволяет классифицировать изображения по произвольным текстовым категориям и проверять соответствие распознанного текста изображению без необходимости дообучения.
 
 ## Оглавление
 
 1. [Архитектура](#1-архитектура)
 2. [API спецификация](#2-api-спецификация)
+   - 2.1 [Классификация](#21-классификация)
+   - 2.2 [Валидация OCR](#22-валидация-ocr)
+   - 2.3 [Health & Info](#23-health--info)
 3. [Установка и запуск](#3-установка-и-запуск)
 4. [Конфигурация](#4-конфигурация)
 5. [Клиентский код](#5-клиентский-код)
+   - 5.1 [Классификация](#51-классификация)
+   - 5.2 [Валидация OCR](#52-валидация-ocr)
 6. [Интеграция с воркером обработки вложений](#6-интеграция-с-воркером-обработки-вложений)
 7. [Мониторинг и отладка](#7-мониторинг-и-отладка)
 
@@ -29,23 +34,20 @@
 - **Асинхронная очередь** — задачи обрабатываются последовательно
 - **Batch-обработка** — несколько изображений за один HTTP-запрос
 
-### Что такое zero-shot классификация?
+### Возможности сервиса
 
-Вы сами описываете категории словами, и CLIP определяет, к какой из них относится изображение:
-
-```json
-{
-  "categories": ["скриншот экрана", "фото товара", "фото упаковки", "сообщение об ошибке"]
-}
-```
-
-→ Сервис возвращает наиболее подходящую категорию для каждого изображения.
+| Функция | Описание |
+|---------|----------|
+| **Классификация** | Определение категории изображения (скриншот, фото товара, чек и т.д.) |
+| **Валидация OCR** | Проверка, соответствует ли распознанный текст изображению |
 
 ---
 
 ## 2. API спецификация
 
-### 2.1 POST `/classify` — классификация одного изображения
+### 2.1 Классификация
+
+#### POST `/classify` — классификация одного изображения
 
 **Запрос:**
 ```bash
@@ -75,7 +77,7 @@ curl -X POST http://localhost:8001/classify \
 }
 ```
 
-### 2.2 POST `/classify/batch` — батчевая классификация (основной режим)
+#### POST `/classify/batch` — батчевая классификация
 
 **Запрос:**
 ```bash
@@ -114,13 +116,84 @@ curl -X POST http://localhost:8001/classify/batch \
 }
 ```
 
-### 2.3 GET `/health` — проверка здоровья
+---
+
+### 2.2 Валидация OCR
+
+#### POST `/validate` — валидация одного результата
+
+**Запрос:**
+```bash
+curl -X POST http://localhost:8001/validate \
+  -H "Content-Type: application/json" \
+  -H "X-API-Secret: your_secret_key" \
+  -d '{
+    "image": "iVBORw0KGgo...",
+    "text": "распознанный текст",
+    "threshold": 0.5
+  }'
+```
+
+**Ответ:**
+```json
+{
+  "success": true,
+  "task_id": "uuid",
+  "is_valid": true,
+  "confidence": 0.87,
+  "processing_time_ms": 98.7,
+  "error": null
+}
+```
+
+#### POST `/validate/batch` — батчевая валидация
+
+**Запрос:**
+```bash
+curl -X POST http://localhost:8001/validate/batch \
+  -H "Content-Type: application/json" \
+  -H "X-API-Secret: your_secret_key" \
+  -d '{
+    "images": ["iVBORw0KGgo...", "iVBORw0KGgo..."],
+    "texts": ["текст1", "текст2"],
+    "threshold": 0.5
+  }'
+```
+
+**Ответ:**
+```json
+{
+  "success": true,
+  "task_id": "uuid",
+  "results": [
+    {
+      "success": true,
+      "is_valid": true,
+      "confidence": 0.87,
+      "processing_time_ms": 98.7
+    },
+    {
+      "success": true,
+      "is_valid": false,
+      "confidence": 0.32,
+      "processing_time_ms": 95.2
+    }
+  ],
+  "processing_time_ms": 195.0,
+  "error": null
+}
+```
+
+---
+
+### 2.3 Health & Info
+
+#### GET `/health`
 
 ```bash
 curl http://localhost:8001/health
 ```
 
-**Ответ:**
 ```json
 {
   "status": "healthy",
@@ -131,13 +204,12 @@ curl http://localhost:8001/health
 }
 ```
 
-### 2.4 GET `/info` — информация о сервисе
+#### GET `/info`
 
 ```bash
 curl http://localhost:8001/info
 ```
 
-**Ответ:**
 ```json
 {
   "service": "CLIP Classification Service",
@@ -155,7 +227,15 @@ curl http://localhost:8001/info
   ],
   "max_images_per_batch": 50,
   "max_image_size_mb": 10,
-  "queue_maxsize": 100
+  "queue_maxsize": 100,
+  "endpoints": [
+    "/classify",
+    "/classify/batch",
+    "/validate",
+    "/validate/batch",
+    "/health",
+    "/info"
+  ]
 }
 ```
 
@@ -163,7 +243,7 @@ curl http://localhost:8001/info
 
 ## 3. Установка и запуск
 
-### 3.1 Установка зависименностей
+### 3.1 Установка зависимостей
 
 ```bash
 pip install torch transformers pillow fastapi uvicorn python-multipart python-dotenv
@@ -182,6 +262,7 @@ REQUIRE_AUTH=true
 
 # Модель
 MODEL_NAME=openai/clip-vit-base-patch32
+MODELS_ROOT=./models
 
 # Очередь
 QUEUE_MAXSIZE=100
@@ -208,7 +289,7 @@ python main.py
 ### 3.4 Procfile для Honcho/Overmind
 
 ```procfile
-classification: uvicorn main:app --host 0.0.0.0 --port ${CLASSIFICATION_PORT:-8001} --workers 1
+clip-service: uvicorn main:app --host 0.0.0.0 --port ${CLIP_PORT:-8001} --workers 1
 ```
 
 ### 3.5 Dockerfile
@@ -240,12 +321,13 @@ fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 python-dotenv>=1.0.0
 python-multipart>=0.0.6
+huggingface-hub>=0.20.0
 ```
 
 ### 3.6 Структура проекта
 
 ```
-classification_service/
+clip_service/
 ├── shared/
 │   ├── __init__.py
 │   ├── config.py          # Конфигурация
@@ -271,6 +353,7 @@ classification_service/
 | `HOST` | str | `localhost` | Адрес сервера |
 | `PORT` | int | `8001` | Порт сервера |
 | `MODEL_NAME` | str | `openai/clip-vit-base-patch32` | Модель CLIP |
+| `MODELS_ROOT` | Path | `./models` | Папка для хранения моделей |
 | `DEVICE` | str | auto (mps/cuda/cpu) | Устройство для инференса |
 | `QUEUE_MAXSIZE` | int | `100` | Максимальный размер очереди |
 | `BATCH_TIMEOUT` | float | `30.0` | Таймаут обработки батча (сек) |
@@ -293,109 +376,164 @@ DEFAULT_CATEGORIES = [
 ]
 ```
 
+### Пороги валидации
+
+| Confidence | Оценка | Рекомендация |
+|------------|--------|--------------|
+| > 0.7 | Отлично | Результат достоверен |
+| 0.4 - 0.7 | Средне | Можно использовать с осторожностью |
+| < 0.4 | Плохо | Вероятна ошибка OCR, требуется повтор |
+
 ---
 
 ## 5. Клиентский код
 
-### 5.1 Базовый клиент
+### 5.1 Классификация
 
 ```python
-import httpx
-import asyncio
-
-async def classify_image(image_b64: str, categories: list = None):
-    async with httpx.AsyncClient() as client:
-        payload = {"image": image_b64}
-        if categories:
-            payload["categories"] = categories
-        
-        response = await client.post(
-            "http://localhost:8001/classify",
-            json=payload,
-            timeout=30
-        )
-        return response.json()
-
-# Использование
-result = asyncio.run(classify_image("iVBORw0KGgo..."))
-print(result["category"], result["confidence"])
-```
-
-### 5.2 Батчевый клиент
-
-```python
-async def classify_batch(images_b64: list, categories: list = None):
-    async with httpx.AsyncClient() as client:
-        payload = {"images": images_b64}
-        if categories:
-            payload["categories"] = categories
-        
-        response = await client.post(
-            "http://localhost:8001/classify/batch",
-            json=payload,
-            timeout=120
-        )
-        return response.json()["results"]
-
-# Использование
-results = asyncio.run(classify_batch([b64_1, b64_2]))
-for r in results:
-    print(r["category"], r["confidence"])
-```
-
-### 5.3 С авторизацией (рекомендуемый)
-
-```python
+# classification_client.py
 from http_utils import RetryableHTTPClient, create_signed_client, AuthType
+from typing import List
 
-async def classify_with_auth(images_b64: list, secret: str):
-    client = create_signed_client(
-        RetryableHTTPClient(base_timeout=30, max_retries=2),
-        secret=secret,
-        auth_type=AuthType.SECRET_HEADER_AUTH
-    )
+
+class ClassificationClient:
+    """Клиент для классификации изображений."""
     
-    async with client:
-        response = await client.post_with_retry(
-            "http://localhost:8001/classify/batch",
-            json={"images": images_b64}
-        )
-        return response.json()["results"]
+    def __init__(self, base_url: str = "http://localhost:8001", secret: str = None):
+        self.base_url = base_url
+        self.secret = secret
+    
+    def _get_client(self):
+        if self.secret:
+            return create_signed_client(
+                RetryableHTTPClient(base_timeout=30, max_retries=2),
+                secret=self.secret,
+                auth_type=AuthType.SECRET_HEADER_AUTH
+            )
+        return RetryableHTTPClient(base_timeout=30, max_retries=2)
+    
+    async def classify_batch(self, images_b64: List[str], categories: List[str] = None) -> List[dict]:
+        """Классифицирует батч изображений."""
+        async with self._get_client() as client:
+            payload = {"images": images_b64}
+            if categories:
+                payload["categories"] = categories
+            
+            response = await client.post_with_retry(
+                f"{self.base_url}/classify/batch",
+                json=payload
+            )
+            
+            result = response.json()
+            if not result.get("success"):
+                raise Exception(result.get("error", "Classification failed"))
+            
+            return result["results"]
+```
+
+### 5.2 Валидация OCR
+
+```python
+# ocr_validation_client.py
+from http_utils import RetryableHTTPClient, create_signed_client, AuthType
+from typing import List
+
+
+class OCRValidationClient:
+    """Клиент для валидации OCR результатов."""
+    
+    def __init__(self, base_url: str = "http://localhost:8001", secret: str = None):
+        self.base_url = base_url
+        self.secret = self.secret
+    
+    def _get_client(self):
+        if self.secret:
+            return create_signed_client(
+                RetryableHTTPClient(base_timeout=30, max_retries=2),
+                secret=self.secret,
+                auth_type=AuthType.SECRET_HEADER_AUTH
+            )
+        return RetryableHTTPClient(base_timeout=30, max_retries=2)
+    
+    async def validate_batch(
+        self, 
+        images_b64: List[str], 
+        texts: List[str], 
+        threshold: float = 0.5
+    ) -> List[dict]:
+        """
+        Батчевая валидация OCR результатов.
+        
+        Returns:
+            List[dict]: [{"is_valid": bool, "confidence": float}, ...]
+        """
+        async with self._get_client() as client:
+            response = await client.post_with_retry(
+                f"{self.base_url}/validate/batch",
+                json={
+                    "images": images_b64,
+                    "texts": texts,
+                    "threshold": threshold
+                }
+            )
+            
+            result = response.json()
+            if not result.get("success"):
+                raise Exception(result.get("error", "Validation failed"))
+            
+            return [
+                {"is_valid": r["is_valid"], "confidence": r["confidence"]}
+                for r in result["results"]
+            ]
 ```
 
 ---
 
 ## 6. Интеграция с воркером обработки вложений
 
-### Добавление классификации в `w_attachments_handler`:
+### Добавление классификации и валидации в `w_attachments_handler`:
 
 ```python
 # В __init__ воркера
 self.classifier = ClassificationClient(base_url=config.CLASSIFICATION_URL)
+self.ocr_validator = OCRValidationClient(base_url=config.CLASSIFICATION_URL)
 
-# В _process_attachments, перед отправкой в OCR
+# В _process_attachments
+
+# 1. Классификация изображений
 if pending_attachments:
     images_b64 = [att.data for _, att in pending_attachments]
     
     try:
         classifications = await self.classifier.classify_batch(images_b64)
         
-        for (msg, attachment), cls in zip(pending_attachments, classifications):
+        for (msg, att), cls in zip(pending_attachments, classifications):
             if cls["success"] and cls["confidence"] > 0.6:
-                logger.info(f"Attachment {attachment.id}: {cls['category']} ({cls['confidence']:.2f})")
+                att.category = cls["category"]
+                att.confidence = cls["confidence"]
                 
-                # Сохраняем категорию в метаданные (опционально)
-                attachment.category = cls["category"]
-                attachment.confidence = cls["confidence"]
-                
-                # Приоритизация на основе категории
+                # Приоритизация
                 if cls["category"] == "сообщение об ошибке":
-                    attachment.priority = "high"
-                elif cls["category"] == "скриншот экрана":
-                    attachment.priority = "medium"
+                    att.priority = "high"
     except Exception as e:
         logger.error(f"Classification failed: {e}")
-        # Продолжаем обработку без классификации
+
+# 2. После OCR — валидация
+if ocr_results:
+    images_b64 = [att.data for _, att in pending_attachments]
+    texts = [r["text"] for r in ocr_results if r.get("success")]
+    
+    try:
+        validations = await self.ocr_validator.validate_batch(images_b64, texts, threshold=0.5)
+        
+        for (msg, att), validation in zip(pending_attachments, validations):
+            if validation["is_valid"]:
+                logger.info(f"OCR result validated for {att.id}: {validation['confidence']:.2f}")
+            else:
+                logger.warning(f"OCR validation failed for {att.id}: {validation['confidence']:.2f}")
+                # Отправляем на эскалацию или повтор
+    except Exception as e:
+        logger.error(f"Validation failed: {e}")
 ```
 
 ### Конфиг для воркера:
@@ -444,12 +582,12 @@ curl http://localhost:8001/info
 
 | Аспект | Преимущество |
 |--------|-------------|
-| **Zero-shot** | Не нужно собирать датасет и дообучать модель |
-| **Гибкость** | Категории можно менять на лету в запросе |
+| **Zero-shot классификация** | Не нужно собирать датасет и дообучать модель |
+| **Zero-shot валидация** | CLIP сам определяет, соответствует ли текст изображению |
+| **Гибкость** | Категории и пороги можно менять на лету |
 | **Производительность** | Batch-обработка до 50 изображений за раз |
 | **Масштабирование** | Отдельный сервис не дублирует модель в воркерах |
 | **Русский язык** | Категории на русском работают |
-| **Авторизация** | Поддержка единой схемы авторизации с другими сервисами |
 
 ---
 
