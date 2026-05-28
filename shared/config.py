@@ -59,7 +59,7 @@ class Config:
 
     # --- Логирование ---
     LOG_PATH = Path(os.getenv("LOG_PATH", "logs"))
-    LOGGING_LEVEL = os.getenv("LOGGING_LEVEL", "INFO")
+    LOGGING_LEVEL = os.getenv("LOGGING_LEVEL", "DEBUG")
     DOCKER_ENV = os.getenv("DOCKER_ENV", "false").lower() == "true"
 
 

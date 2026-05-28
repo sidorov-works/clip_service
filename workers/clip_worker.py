@@ -10,7 +10,6 @@ CLIP Worker — единственный владелец модели CLIP.
 import asyncio
 import time
 import io
-from pathlib import Path
 
 import torch
 from PIL import Image
@@ -18,10 +17,7 @@ from transformers import CLIPProcessor, CLIPModel
 from huggingface_hub import snapshot_download
 
 from shared.config import config
-from shared.models import (
-    ClassifyTask, ClassifyResult,
-    ValidateTask, ValidateResult
-)
+from shared.models import ClassifyTask, ClassifyResult
 
 import logging
 logger = logging.getLogger(__name__)
@@ -80,7 +76,6 @@ class CLIPWorker:
     async def start(self):
         """
         Запускает цикл обработки задач.
-        Определяет тип задачи и вызывает соответствующий метод.
         """
         await self.load_model()
         
@@ -88,11 +83,9 @@ class CLIPWorker:
             try:
                 task = await asyncio.wait_for(self.input_queue.get(), timeout=1.0)
                 
-                # Определяем тип задачи и вызываем соответствующий обработчик
+                # Только классификация
                 if isinstance(task, ClassifyTask):
                     result = await self._process_classify(task)
-                elif isinstance(task, ValidateTask):
-                    result = await self._process_validate(task)
                 else:
                     logger.error(f"Unknown task type: {type(task)}")
                     continue
@@ -170,62 +163,6 @@ class CLIPWorker:
             return ClassifyResult(
                 task_id=task.task_id,
                 success=False,
-                error=str(e),
-                processing_time_ms=processing_time_ms
-            )
-    
-    async def _process_validate(self, task: ValidateTask) -> ValidateResult:
-        """
-        Обрабатывает задачу валидации (проверяет, соответствует ли текст изображению).
-        
-        Args:
-            task: Задача с изображением и распознанным текстом
-            
-        Returns:
-            ValidateResult: Результат валидации (confidence 0-1)
-        """
-        start_time = time.time()
-        
-        try:
-            # Декодируем изображение
-            image = Image.open(io.BytesIO(task.image_bytes)).convert("RGB")
-            
-            def _validate():
-                # Подготавливаем входные данные
-                inputs = self.processor(
-                    text=[task.text],
-                    images=image,
-                    return_tensors="pt",
-                    padding=True
-                ).to(self.device)
-                
-                # Инференс
-                with torch.no_grad():
-                    outputs = self.model(**inputs)
-                    # logits_per_image: (1, 1) — сходство между изображением и текстом
-                    # Применяем sigmoid для преобразования в вероятность (0-1)
-                    similarity = torch.sigmoid(outputs.logits_per_image)[0][0].item()
-                
-                return similarity
-            
-            confidence = await asyncio.to_thread(_validate)
-            
-            processing_time_ms = (time.time() - start_time) * 1000
-            
-            return ValidateResult(
-                task_id=task.task_id,
-                success=True,
-                confidence=confidence,
-                processing_time_ms=processing_time_ms
-            )
-            
-        except Exception as e:
-            processing_time_ms = (time.time() - start_time) * 1000
-            logger.error(f"Validation error for task {task.task_id}: {e}")
-            return ValidateResult(
-                task_id=task.task_id,
-                success=False,
-                confidence=0.0,
                 error=str(e),
                 processing_time_ms=processing_time_ms
             )
