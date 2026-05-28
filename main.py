@@ -47,7 +47,7 @@ from pathlib import Path
 from logger_utils import get_logger
 logger = get_logger(
     name="CLIP SERVICE",
-    level="DEBUG",
+    level="INFO",
     log_file=Path("logs") / "app.log",
     docker_mode=False
 )
