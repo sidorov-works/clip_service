@@ -39,14 +39,15 @@ class Config:
         DEVICE = "cpu"
 
     # --- Категории по умолчанию (можно переопределить в запросе) ---
+    # (на английском - поскольку CLIP модели обучались в основном на англ.языке)
     DEFAULT_CATEGORIES = [
-        "скриншот экрана компьютера или телефона",
-        "фотография товара",
-        "фотография упаковки или коробки",
-        "сообщение об ошибке на экране",
-        "фотография чека или документа",
-        "фотография человека",
-        "другое изображение"
+        "screenshot of computer or phone screen",
+        "photo of a product",
+        "photo of packaging or box",
+        "error message on screen",
+        "photo of receipt or document",
+        "photo of a person",
+        "other image"
     ]
 
     # --- Очередь ---
