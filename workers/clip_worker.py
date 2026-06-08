@@ -17,7 +17,7 @@ from transformers import CLIPProcessor, CLIPModel
 from huggingface_hub import snapshot_download
 
 from shared.config import config
-from shared.models import ClassifyTask, ClassifyResult
+from shared.schemas import ClassifyTask, ClassifyResult
 
 import logging
 logger = logging.getLogger(__name__)

@@ -1,4 +1,4 @@
-# shared/models.py
+# shared/schemas.py
 """
 Pydantic модели для API и dataclass'ы для внутренней очереди.
 """
@@ -11,7 +11,8 @@ from dataclasses import dataclass
 # ======================================================================
 # Pydantic модели для API
 
-# --- Классификация (одиночная) ---
+# ----------------------------------------------------------------------
+# Классификация (одиночная)
 
 class ClassifyRequest(BaseModel):
     """Запрос на классификацию одного изображения."""
@@ -30,7 +31,8 @@ class ClassifyResponse(BaseModel):
     error: Optional[str] = None
 
 
-# --- Классификация (батчевая) ---
+# ----------------------------------------------------------------------
+# Классификация (батчевая)
 
 class BatchClassifyRequest(BaseModel):
     """Батчевый запрос на классификацию нескольких изображений."""
@@ -46,7 +48,9 @@ class BatchClassifyResponse(BaseModel):
     processing_time_ms: float = 0
     error: Optional[str] = None
 
-# --- Health & Info ---
+
+# ----------------------------------------------------------------------
+# Health & Info 
 
 class HealthResponse(BaseModel):
     """Ответ health check."""

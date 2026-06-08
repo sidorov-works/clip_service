@@ -28,7 +28,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from shared.config import config
-from shared.models import (
+from shared.schemas import (
     # Pydantic модели для API
     ClassifyRequest, 
     ClassifyResponse,
