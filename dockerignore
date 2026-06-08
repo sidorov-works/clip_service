@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.so
+.Python
+venv/
+env/
+.venv/
+
+# Локальная разработка
+procfile
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Логи и данные
+logs/
+models/
+*.log
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Env (не копируем в образ, будем монтировать)
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tests
+tests/
+*.pytest_cache/
+
+# Docs
+README.md
+docs/

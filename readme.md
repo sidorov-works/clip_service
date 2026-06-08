@@ -6,19 +6,17 @@
 
 1. [Архитектура](#1-архитектура)
 2. [API спецификация](#2-api-спецификация)
-   - 2.1 [Классификация](#21-классификация)
-   - 2.2 [Health & Info](#22-health--info)
 3. [Установка и запуск](#3-установка-и-запуск)
-4. [Конфигурация](#4-конфигурация)
-5. [Клиентский код](#5-клиентский-код)
-6. [Интеграция с воркером обработки вложений](#6-интеграция-с-воркером-обработки-вложений)
+4. [Docker](#4-docker)
+5. [Конфигурация](#5-конфигурация)
+6. [Клиентский код](#6-клиентский-код)
 7. [Мониторинг и отладка](#7-мониторинг-и-отладка)
 
 ---
 
 ## 1. Архитектура
 
-Сервис построен по аналогии с TEI-сервисом:
+Сервис построен по стандартной схеме с очередью:
 
 ```
 ┌─────────────┐     ┌──────────────┐     ┌─────────────┐     ┌──────────────┐
@@ -79,7 +77,7 @@ curl -X POST http://localhost:8001/classify \
 }
 ```
 
-#### POST `/classify/batch` — батчевая классификация (основной режим)
+#### POST `/classify/batch` — батчевая классификация
 
 **Запрос:**
 ```bash
@@ -130,7 +128,7 @@ curl http://localhost:8001/health
 ```json
 {
   "status": "healthy",
-  "device": "mps",
+  "device": "cuda",
   "model": "openai/clip-vit-base-patch32",
   "queue_size": 0,
   "tasks_processed": 42
@@ -149,15 +147,15 @@ curl http://localhost:8001/info
   "service": "CLIP Classification Service",
   "version": "1.0.0",
   "model": "openai/clip-vit-base-patch32",
-  "device": "mps",
+  "device": "cuda",
   "default_categories": [
-    "скриншот экрана компьютера или телефона",
-    "фотография товара",
-    "фотография упаковки или коробки",
-    "сообщение об ошибке на экране",
-    "фотография чека или документа",
-    "фотография человека",
-    "другое изображение"
+    "screenshot of computer or phone screen",
+    "photo of a product",
+    "photo of packaging or box",
+    "error message on screen",
+    "photo of receipt or document",
+    "photo of a person",
+    "other image"
   ],
   "max_images_per_batch": 50,
   "max_image_size_mb": 10,
@@ -178,7 +176,7 @@ curl http://localhost:8001/info
 ### 3.1 Установка зависимостей
 
 ```bash
-pip install torch transformers pillow fastapi uvicorn python-multipart python-dotenv
+pip install -r requirements.txt
 ```
 
 ### 3.2 Переменные окружения (.env)
@@ -196,6 +194,9 @@ REQUIRE_AUTH=true
 MODEL_NAME=openai/clip-vit-base-patch32
 MODELS_ROOT=./models
 
+# Device (cuda / mps / cpu)
+DEVICE=cuda
+
 # Очередь
 QUEUE_MAXSIZE=100
 BATCH_TIMEOUT=30.0
@@ -210,7 +211,7 @@ LOGGING_LEVEL=INFO
 DOCKER_ENV=false
 ```
 
-### 3.3 Запуск сервиса
+### 3.3 Локальный запуск
 
 ```bash
 python main.py
@@ -218,101 +219,208 @@ python main.py
 
 Сервис запустится на `http://localhost:8001`
 
-### 3.4 Procfile для Honcho/Overmind
-
-```procfile
-clip-service: uvicorn main:app --host 0.0.0.0 --port ${CLIP_PORT:-8001} --workers 1
-```
-
-### 3.5 Dockerfile
-
-```dockerfile
-FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
-
-WORKDIR /app
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY . .
-
-ENV DEVICE=cuda
-ENV DOCKER_ENV=true
-
-EXPOSE 8001
-
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]
-```
-
-**requirements.txt:**
-```
-torch>=2.0.0
-transformers>=4.36.0
-pillow>=10.0.0
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
-python-dotenv>=1.0.0
-python-multipart>=0.0.6
-huggingface-hub>=0.20.0
-```
-
-### 3.6 Структура проекта
+### 3.4 Структура проекта
 
 ```
 clip_service/
 ├── shared/
 │   ├── __init__.py
 │   ├── config.py          # Конфигурация
-│   ├── models.py          # Pydantic модели
-│   └── auth_service.py    # Авторизация (общая с другими сервисами)
+│   ├── schemas.py         # Pydantic модели
+│   └── auth_service.py    # Авторизация
 ├── workers/
 │   ├── __init__.py
 │   └── clip_worker.py     # Воркер с моделью CLIP
 ├── main.py                # FastAPI приложение
 ├── requirements.txt
 ├── .env
+├── .dockerignore
+├── Dockerfile
+├── docker-compose.yml
 └── README.md
 ```
 
 ---
 
-## 4. Конфигурация
+## 4. Docker
 
-### Основные параметры (shared/config.py)
+### 4.1 Dockerfile
+
+```dockerfile
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+
+WORKDIR /app
+
+# Установка системных зависимостей
+RUN apt-get update && apt-get install -y \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Копирование зависимостей
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Копирование кода
+COPY . .
+
+# Создание директории для моделей
+RUN mkdir -p /app/models
+
+# Переменные окружения
+ENV PYTHONPATH=/app
+ENV MODELS_ROOT=/app/models
+ENV DOCKER_ENV=true
+
+EXPOSE 8001
+
+CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]
+```
+
+### 4.2 docker-compose.yml
+
+```yaml
+version: '3.8'
+
+services:
+  clip-service:
+    build: .
+    ports:
+      - "8001:8001"
+    environment:
+      - MODEL_NAME=openai/clip-vit-base-patch32
+      - DEVICE=cuda
+      - MODELS_ROOT=/app/models
+      - DOCKER_ENV=true
+      - QUEUE_MAXSIZE=100
+      - MAX_IMAGES_PER_BATCH=50
+      - MAX_IMAGE_SIZE_MB=10
+      - REQUIRE_AUTH=true
+      - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-your-secret-key}
+      - LOG_PATH=/app/logs
+      - LOGGING_LEVEL=INFO
+    volumes:
+      - ./models:/app/models    # Сохраняем скачанные модели между запусками
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+```
+
+### 4.3 .dockerignore
+
+```dockerignore
+__pycache__/
+*.pyc
+venv/
+.venv/
+.vscode/
+.idea/
+logs/
+models/
+.git/
+.gitignore
+.env.local
+.DS_Store
+README.md
+```
+
+### 4.4 Сборка и запуск
+
+```bash
+# Сборка образа
+docker-compose build
+
+# Запуск сервиса
+docker-compose up -d
+
+# Просмотр логов
+docker-compose logs -f
+
+# Остановка
+docker-compose down
+
+# Перезапуск после изменения .env или конфигов
+docker-compose restart
+```
+
+### 4.5 Важно про кэш моделей
+
+Модель скачивается **при первом запуске** в папку `/app/models`. Благодаря volume:
+
+```yaml
+volumes:
+  - ./models:/app/models
+```
+
+Папка `models` сохраняется на хосте, поэтому:
+- **Первый запуск** → модель скачается (600 MB, ~2-3 минуты)
+- **Последующие запуски** → модель уже на диске, загружается мгновенно
+
+При пересборке контейнера модель **не скачивается заново**, если папка `./models` не удалена.
+
+### 4.6 Когда нужна пересборка
+
+| Изменение | Действие |
+|-----------|----------|
+| `.env` | `docker-compose restart` |
+| `config.py` | `docker-compose restart` |
+| `main.py` или `workers/*.py` | `docker-compose restart` |
+| `requirements.txt` | `docker-compose build --no-cache` |
+| `Dockerfile` | `docker-compose build` |
+
+---
+
+## 5. Конфигурация
+
+### Основные параметры
 
 | Параметр | Тип | Значение по умолчанию | Описание |
 |----------|-----|----------------------|----------|
-| `HOST` | str | `localhost` | Адрес сервера |
+| `HOST` | str | `0.0.0.0` | Адрес сервера |
 | `PORT` | int | `8001` | Порт сервера |
 | `MODEL_NAME` | str | `openai/clip-vit-base-patch32` | Модель CLIP |
 | `MODELS_ROOT` | Path | `./models` | Папка для хранения моделей |
-| `DEVICE` | str | auto (mps/cuda/cpu) | Устройство для инференса |
+| `DEVICE` | str | auto | Устройство (`cuda`/`mps`/`cpu`) |
 | `QUEUE_MAXSIZE` | int | `100` | Максимальный размер очереди |
-| `BATCH_TIMEOUT` | float | `30.0` | Таймаут обработки батча (сек) |
+| `BATCH_TIMEOUT` | float | `30.0` | Таймаут обработки (сек) |
 | `MAX_IMAGES_PER_BATCH` | int | `50` | Максимум изображений в батче |
-| `MAX_IMAGE_SIZE_MB` | int | `10` | Максимальный размер изображения (MB) |
+| `MAX_IMAGE_SIZE_MB` | int | `10` | Максимальный размер изображения |
 | `REQUIRE_AUTH` | bool | `true` | Требовать авторизацию |
-| `INTERNAL_API_SECRET` | str | - | Секретный ключ для авторизации |
+| `INTERNAL_API_SECRET` | str | - | Секретный ключ |
 
 ### Категории по умолчанию
 
 ```python
 DEFAULT_CATEGORIES = [
-    "скриншот экрана компьютера или телефона",
-    "фотография товара",
-    "фотография упаковки или коробки",
-    "сообщение об ошибке на экране",
-    "фотография чека или документа",
-    "фотография человека",
-    "другое изображение"
+    "screenshot of computer or phone screen",
+    "photo of a product",
+    "photo of packaging or box",
+    "error message on screen",
+    "photo of receipt or document",
+    "photo of a person",
+    "other image"
 ]
 ```
 
+**Примечание:** Категории на английском, так как CLIP модели обучались преимущественно на английских текстах.
+
 ---
 
-## 5. Клиентский код
+## 6. Клиентский код
 
-### 5.1 Базовый клиент
+### 6.1 Базовый клиент
 
 ```python
 import httpx
@@ -336,7 +444,7 @@ result = asyncio.run(classify_image("iVBORw0KGgo..."))
 print(result["category"], result["confidence"])
 ```
 
-### 5.2 Батчевый клиент
+### 6.2 Батчевый клиент
 
 ```python
 async def classify_batch(images_b64: list, categories: list = None):
@@ -358,66 +466,31 @@ for r in results:
     print(r["category"], r["confidence"])
 ```
 
-### 5.3 С авторизацией (рекомендуемый)
+### 6.3 С авторизацией
 
 ```python
-from http_utils import RetryableHTTPClient, create_signed_client, AuthType
+import httpx
+from jose import jwt
+import time
 
-async def classify_with_auth(images_b64: list, secret: str):
-    client = create_signed_client(
-        RetryableHTTPClient(base_timeout=30, max_retries=2),
-        secret=secret,
-        auth_type=AuthType.SECRET_HEADER_AUTH
-    )
+def generate_token(secret: str) -> str:
+    payload = {
+        "exp": time.time() + 3600,
+        "iat": time.time()
+    }
+    return jwt.encode(payload, secret, algorithm="HS256")
+
+async def classify_with_auth(image_b64: str, secret: str):
+    token = generate_token(secret)
     
-    async with client:
-        response = await client.post_with_retry(
-            "http://localhost:8001/classify/batch",
-            json={"images": images_b64}
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "http://localhost:8001/classify",
+            json={"image": image_b64},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30
         )
-        return response.json()["results"]
-```
-
----
-
-## 6. Интеграция с воркером обработки вложений
-
-### Добавление классификации в `w_attachments_handler`:
-
-```python
-# В __init__ воркера
-self.classifier = ClassificationClient(base_url=config.CLASSIFICATION_URL)
-
-# В _process_attachments, перед отправкой в OCR
-if pending_attachments:
-    images_b64 = [att.data for _, att in pending_attachments]
-    
-    try:
-        classifications = await self.classifier.classify_batch(images_b64)
-        
-        for (msg, attachment), cls in zip(pending_attachments, classifications):
-            if cls["success"] and cls["confidence"] > 0.6:
-                logger.info(f"Attachment {attachment.id}: {cls['category']} ({cls['confidence']:.2f})")
-                
-                # Сохраняем категорию в метаданные (опционально)
-                attachment.category = cls["category"]
-                attachment.confidence = cls["confidence"]
-                
-                # Приоритизация на основе категории
-                if cls["category"] == "сообщение об ошибке":
-                    attachment.priority = "high"
-                elif cls["category"] == "скриншот экрана":
-                    attachment.priority = "medium"
-    except Exception as e:
-        logger.error(f"Classification failed: {e}")
-        # Продолжаем обработку без классификации
-```
-
-### Конфиг для воркера:
-
-```python
-# shared/config.py
-CLASSIFICATION_URL = os.getenv("CLASSIFICATION_URL", "http://localhost:8001")
+        return response.json()
 ```
 
 ---
@@ -436,35 +509,25 @@ curl http://localhost:8001/health
 curl http://localhost:8001/info
 ```
 
-### Логирование
+### Просмотр логов
 
-Сервис логирует:
-- Загрузку модели
-- Количество обработанных задач
-- Ошибки при обработке
+```bash
+# Локально
+tail -f logs/app.log
+
+# Docker
+docker-compose logs -f clip-service
+```
 
 ### Типичные проблемы
 
 | Проблема | Решение |
 |----------|---------|
-| 401 Unauthorized | Проверьте `INTERNAL_API_SECRET` и заголовок `Authorization: Bearer <token>` |
+| 401 Unauthorized | Проверьте `INTERNAL_API_SECRET` и заголовок `Authorization` |
 | Модель не загружается | Проверьте интернет для скачивания модели (первый запуск) |
 | Out of memory | Уменьшите `MAX_IMAGES_PER_BATCH` |
 | Таймаут | Увеличьте `BATCH_TIMEOUT` |
 | Неверный base64 | Убедитесь, что изображение в правильном формате |
-
----
-
-## Преимущества использования
-
-| Аспект | Преимущество |
-|--------|-------------|
-| **Zero-shot** | Не нужно собирать датасет и дообучать модель |
-| **Гибкость** | Категории можно менять на лету в запросе |
-| **Производительность** | Batch-обработка до 50 изображений за раз |
-| **Масштабирование** | Отдельный сервис не дублирует модель в воркерах |
-| **Русский язык** | Категории на русском работают |
-| **Авторизация** | Поддержка единой схемы авторизации с другими сервисами |
 
 ---
 

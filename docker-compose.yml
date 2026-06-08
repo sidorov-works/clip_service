@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  clip-service:
+    build: .
+    ports:
+      - "8001:8001"
+    environment:
+      - MODEL_NAME=openai/clip-vit-base-patch32
+      - DEVICE=cuda
+      - MODELS_ROOT=/app/models
+      - DOCKER_ENV=true
+      - QUEUE_MAXSIZE=100
+      - MAX_IMAGES_PER_BATCH=50
+      - MAX_IMAGE_SIZE_MB=10
+      - REQUIRE_AUTH=true
+      - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-your-secret-key}
+      - LOG_PATH=/app/logs
+      - LOGGING_LEVEL=INFO
+    volumes:
+      - ./models:/app/models    # сохраняем скачанные модели между запусками
+      - ./logs:/app/logs
+      - ./.env:/app/.env        # опционально
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
