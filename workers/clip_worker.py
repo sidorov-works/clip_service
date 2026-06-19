@@ -39,39 +39,78 @@ class CLIPWorker:
         self.tasks_processed = 0
         self.model_path = config.MODEL_PATH
     
+    
     async def load_model(self):
         """
         Загружает модель CLIP из фиксированной папки.
         Если модели нет — скачивает её.
+        Проверяет существование модели на Hugging Face перед скачиванием.
         """
         def _load():
+            # Проверяем, существует ли модель на Hugging Face
+            try:
+                from huggingface_hub import model_info
+                logger.info(f"Проверка существования модели {config.MODEL_NAME} на Hugging Face...")
+                info = model_info(config.MODEL_NAME)
+                logger.info(f"Модель найдена: {info.id}")
+            except Exception as e:
+                error_msg = f"Модель {config.MODEL_NAME} не найдена на Hugging Face. Ошибка: {e}"
+                logger.error(error_msg)
+                logger.error("Проверьте правильность имени модели в .env файле")
+                # Вместо raise RuntimeError используем sys.exit для немедленного завершения
+                import sys
+                sys.exit(1)
+            
             # Скачиваем модель, если её нет
             if not self.model_path.exists():
                 logger.info(f"Скачивание модели {config.MODEL_NAME} в {self.model_path}")
                 self.model_path.parent.mkdir(parents=True, exist_ok=True)
                 
-                snapshot_download(
-                    repo_id=config.MODEL_NAME,
-                    local_dir=str(self.model_path),
-                    ignore_patterns=["*.h5", "*.ot", "*.msgpack"],
-                    max_workers=4,
-                    resume_download=True
-                )
-                logger.info("Модель скачана")
+                try:
+                    snapshot_download(
+                        repo_id=config.MODEL_NAME,
+                        local_dir=str(self.model_path),
+                        ignore_patterns=["*.h5", "*.ot", "*.msgpack"],
+                        max_workers=4
+                    )
+                    logger.info("Модель скачана")
+                except Exception as e:
+                    logger.error(f"Ошибка при скачивании модели: {e}")
+                    import shutil
+                    if self.model_path.exists():
+                        shutil.rmtree(self.model_path)
+                    import sys
+                    sys.exit(1)
             else:
                 logger.info(f"Модель уже существует в {self.model_path}")
             
             # Загружаем из локальной папки
-            model = CLIPModel.from_pretrained(str(self.model_path))
-            processor = CLIPProcessor.from_pretrained(str(self.model_path))
-            model = model.to(self.device)
-            model.eval()
-            return model, processor
+            try:
+                logger.info("Загрузка модели в память...")
+                model = CLIPModel.from_pretrained(str(self.model_path))
+                processor = CLIPProcessor.from_pretrained(str(self.model_path))
+                
+                logger.info(f"Перенос модели на {self.device}...")
+                model = model.to(self.device)
+                model.eval()
+                
+                logger.info("Модель успешно загружена")
+                return model, processor
+            except Exception as e:
+                logger.error(f"Ошибка при загрузке модели из папки {self.model_path}: {e}")
+                import sys
+                sys.exit(1)
         
         # run_in_executor для загрузки модели (тяжёлая операция)
         loop = asyncio.get_event_loop()
-        self.model, self.processor = await loop.run_in_executor(None, _load)
-        logger.info(f"CLIP модель загружена из {self.model_path} на {self.device}")
+        try:
+            self.model, self.processor = await loop.run_in_executor(None, _load)
+            logger.info(f"CLIP модель загружена из {self.model_path} на {self.device}")
+        except Exception as e:
+            logger.error(f"Критическая ошибка при загрузке модели: {e}")
+            # Принудительно завершаем процесс
+            import sys
+            sys.exit(1)
     
     async def start(self):
         """
