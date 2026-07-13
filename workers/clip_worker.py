@@ -47,44 +47,65 @@ class CLIPWorker:
         Проверяет существование модели на Hugging Face перед скачиванием.
         """
         def _load():
-            # Проверяем, существует ли модель на Hugging Face
-            try:
-                from huggingface_hub import model_info
-                logger.info(f"Проверка существования модели {config.MODEL_NAME} на Hugging Face...")
-                info = model_info(config.MODEL_NAME)
-                logger.info(f"Модель найдена: {info.id}")
-            except Exception as e:
-                error_msg = f"Модель {config.MODEL_NAME} не найдена на Hugging Face. Ошибка: {e}"
-                logger.error(error_msg)
-                logger.error("Проверьте правильность имени модели в .env файле")
-                # Вместо raise RuntimeError используем sys.exit для немедленного завершения
-                import sys
-                sys.exit(1)
-            
-            # Скачиваем модель, если её нет
-            if not self.model_path.exists():
-                logger.info(f"Скачивание модели {config.MODEL_NAME} в {self.model_path}")
-                self.model_path.parent.mkdir(parents=True, exist_ok=True)
+            # 1. Сначала проверяем локальную папку
+            if self.model_path.exists():
+                logger.info(f"Модель найдена локально в {self.model_path}")
+                logger.info("Загрузка модели из локальной папки...")
                 
                 try:
-                    snapshot_download(
-                        repo_id=config.MODEL_NAME,
-                        local_dir=str(self.model_path),
-                        ignore_patterns=["*.h5", "*.ot", "*.msgpack"],
-                        max_workers=4
+                    model = CLIPModel.from_pretrained(
+                        str(self.model_path), 
+                        local_files_only=True
                     )
-                    logger.info("Модель скачана")
+                    processor = CLIPProcessor.from_pretrained(
+                        str(self.model_path),
+                        local_files_only=True
+                    )
+                    
+                    logger.info(f"Перенос модели на {self.device}...")
+                    model = model.to(self.device)
+                    model.eval()
+                    
+                    logger.info("Модель успешно загружена из локальной папки")
+                    return model, processor
+                    
                 except Exception as e:
-                    logger.error(f"Ошибка при скачивании модели: {e}")
-                    import shutil
-                    if self.model_path.exists():
-                        shutil.rmtree(self.model_path)
-                    import sys
-                    sys.exit(1)
-            else:
-                logger.info(f"Модель уже существует в {self.model_path}")
+                    logger.error(f"Ошибка при загрузке модели из локальной папки: {e}")
+                    logger.info("Попытка скачать модель заново...")
+                    # Удаляем повреждённую папку
+                    shutil.rmtree(self.model_path)
             
-            # Загружаем из локальной папки
+            # 2. Модели нет локально — скачиваем
+            logger.info(f"Модель не найдена локально. Проверка существования {config.MODEL_NAME} на Hugging Face...")
+            
+            try:
+                info = model_info(config.MODEL_NAME)
+                logger.info(f"Модель найдена на Hugging Face: {info.id}")
+            except Exception as e:
+                logger.error(f"Модель {config.MODEL_NAME} не найдена на Hugging Face.")
+                logger.error(f"Ошибка: {e}")
+                logger.error("Проверьте правильность имени модели в .env файле")
+                sys.exit(1)
+            
+            # Скачиваем модель
+            logger.info(f"Скачивание модели {config.MODEL_NAME} в {self.model_path}")
+            self.model_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            try:
+                snapshot_download(
+                    repo_id=config.MODEL_NAME,
+                    local_dir=str(self.model_path),
+                    ignore_patterns=["*.h5", "*.ot", "*.msgpack"],
+                    max_workers=4
+                )
+                logger.info("Модель скачана успешно")
+            except Exception as e:
+                logger.error(f"Ошибка при скачивании модели: {e}")
+                if self.model_path.exists():
+                    shutil.rmtree(self.model_path)
+                sys.exit(1)
+            
+            # Загружаем скачанную модель
             try:
                 logger.info("Загрузка модели в память...")
                 model = CLIPModel.from_pretrained(str(self.model_path))
@@ -98,7 +119,8 @@ class CLIPWorker:
                 return model, processor
             except Exception as e:
                 logger.error(f"Ошибка при загрузке модели из папки {self.model_path}: {e}")
-                import sys
+                if self.model_path.exists():
+                    shutil.rmtree(self.model_path)
                 sys.exit(1)
         
         # run_in_executor для загрузки модели (тяжёлая операция)
